@@ -91,7 +91,10 @@ std::string convertCharPointerToStdString(const wchar_t* text)
   return nret;
 #else
   std::string result;
-  char dest[MB_CUR_MAX];
+  // MB_LEN_MAX is the locale-independent compile-time upper bound on the
+  // number of bytes in a multibyte character; using it (rather than the
+  // runtime MB_CUR_MAX) keeps this a fixed-size array instead of a VLA.
+  char dest[MB_LEN_MAX];
   // get number of wide characters in text
   const size_t length = wcslen(text);
   for (size_t i = 0; i < length; i++) {
@@ -11214,7 +11217,8 @@ void RtApi :: convertBuffer( char *outBuffer, char *inBuffer, ConvertInfo &info 
       for (unsigned int i=0; i<stream_.bufferSize; i++) {
         for (j=0; j<info.channels; j++) {
           out[info.outOffset[j]] = (Int32) in[info.inOffset[j]];
-          out[info.outOffset[j]] <<= 24;
+          // Shift via unsigned to avoid UB when the value is negative.
+          out[info.outOffset[j]] = (Int32) ( (uint32_t) out[info.outOffset[j]] << 24 );
         }
         in += info.inJump;
         out += info.outJump;
@@ -11225,7 +11229,8 @@ void RtApi :: convertBuffer( char *outBuffer, char *inBuffer, ConvertInfo &info 
       for (unsigned int i=0; i<stream_.bufferSize; i++) {
         for (j=0; j<info.channels; j++) {
           out[info.outOffset[j]] = (Int32) in[info.inOffset[j]];
-          out[info.outOffset[j]] <<= 16;
+          // Shift via unsigned to avoid UB when the value is negative.
+          out[info.outOffset[j]] = (Int32) ( (uint32_t) out[info.outOffset[j]] << 16 );
         }
         in += info.inJump;
         out += info.outJump;
@@ -11236,7 +11241,8 @@ void RtApi :: convertBuffer( char *outBuffer, char *inBuffer, ConvertInfo &info 
       for (unsigned int i=0; i<stream_.bufferSize; i++) {
         for (j=0; j<info.channels; j++) {
           out[info.outOffset[j]] = (Int32) in[info.inOffset[j]].asInt();
-          out[info.outOffset[j]] <<= 8;
+          // Shift via unsigned to avoid UB when the value is negative.
+          out[info.outOffset[j]] = (Int32) ( (uint32_t) out[info.outOffset[j]] << 8 );
         }
         in += info.inJump;
         out += info.outJump;
@@ -11281,8 +11287,7 @@ void RtApi :: convertBuffer( char *outBuffer, char *inBuffer, ConvertInfo &info 
       signed char *in = (signed char *)inBuffer;
       for (unsigned int i=0; i<stream_.bufferSize; i++) {
         for (j=0; j<info.channels; j++) {
-          out[info.outOffset[j]] = (Int32) (in[info.inOffset[j]] << 16);
-          //out[info.outOffset[j]] <<= 16;
+          out[info.outOffset[j]] = (Int32) ( (uint32_t) (int) in[info.inOffset[j]] << 16 );
         }
         in += info.inJump;
         out += info.outJump;
@@ -11292,8 +11297,7 @@ void RtApi :: convertBuffer( char *outBuffer, char *inBuffer, ConvertInfo &info 
       Int16 *in = (Int16 *)inBuffer;
       for (unsigned int i=0; i<stream_.bufferSize; i++) {
         for (j=0; j<info.channels; j++) {
-          out[info.outOffset[j]] = (Int32) (in[info.inOffset[j]] << 8);
-          //out[info.outOffset[j]] <<= 8;
+          out[info.outOffset[j]] = (Int32) ( (uint32_t) (int) in[info.inOffset[j]] << 8 );
         }
         in += info.inJump;
         out += info.outJump;
@@ -11349,7 +11353,8 @@ void RtApi :: convertBuffer( char *outBuffer, char *inBuffer, ConvertInfo &info 
       for (unsigned int i=0; i<stream_.bufferSize; i++) {
         for (j=0; j<info.channels; j++) {
           out[info.outOffset[j]] = (Int16) in[info.inOffset[j]];
-          out[info.outOffset[j]] <<= 8;
+          // Shift via unsigned to avoid UB when the value is negative.
+          out[info.outOffset[j]] = (Int16) ( (uint16_t) out[info.outOffset[j]] << 8 );
         }
         in += info.inJump;
         out += info.outJump;
@@ -11420,7 +11425,7 @@ void RtApi :: convertBuffer( char *outBuffer, char *inBuffer, ConvertInfo &info 
         out += info.outJump;
       }
     }
-    if (info.inFormat == RTAUDIO_SINT16) {
+    else if (info.inFormat == RTAUDIO_SINT16) {
       Int16 *in = (Int16 *)inBuffer;
       for (unsigned int i=0; i<stream_.bufferSize; i++) {
         for (j=0; j<info.channels; j++) {

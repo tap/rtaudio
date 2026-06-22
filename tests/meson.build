@@ -1,6 +1,9 @@
 apinames = executable('apinames', 'apinames.cpp', dependencies: rtaudio_dep)
 test('API names', apinames)
 
+unittest = executable('unittest', 'unittest.cpp', dependencies: rtaudio_dep)
+test('unit tests', unittest)
+
 audioprobe = executable('audioprobe', 'audioprobe.cpp', dependencies: rtaudio_dep)
 duplex = executable('duplex', 'duplex.cpp', dependencies: rtaudio_dep)
 playraw = executable('playraw', 'playraw.cpp', dependencies: rtaudio_dep)

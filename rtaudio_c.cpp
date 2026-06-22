@@ -1,5 +1,6 @@
 #include "rtaudio_c.h"
 #include "RtAudio.h"
+#include "rtaudio_c_private.h"
 
 #include <cstring>
 
@@ -63,7 +64,7 @@ rtaudio_t rtaudio_create(rtaudio_api_t api) {
   audio->audio = new RtAudio((RtAudio::Api)api,
     [audio](RtAudioErrorType type, const std::string &errorText){
       audio->errtype = (rtaudio_error_t)type;
-      strncpy(audio->errmsg, errorText.c_str(), errorText.size() - 1);
+      rtaudio_copy_error_message(audio->errmsg, sizeof(audio->errmsg), errorText);
     });
   return audio;
 }
