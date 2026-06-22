@@ -1235,15 +1235,18 @@ bool RtApiCore :: probeDeviceInfo( AudioDeviceID id, RtAudio::DeviceInfo& info )
 
   long length = CFStringGetLength(cfname);
   char *mname = (char *)malloc(length * 3 + 1);
+  if ( mname ) {
+    mname[0] = '\0'; // valid string even if the conversion below fails
 #if defined( UNICODE ) || defined( _UNICODE )
-  CFStringGetCString(cfname, mname, length * 3 + 1, kCFStringEncodingUTF8);
+    CFStringGetCString(cfname, mname, length * 3 + 1, kCFStringEncodingUTF8);
 #else
-  CFStringGetCString(cfname, mname, length * 3 + 1, CFStringGetSystemEncoding());
+    CFStringGetCString(cfname, mname, length * 3 + 1, CFStringGetSystemEncoding());
 #endif
-  info.name.append( (const char *)mname, strlen(mname) );
+    info.name.append( (const char *)mname, strlen(mname) );
+    free(mname);
+  }
   info.name.append( ": " );
   CFRelease( cfname );
-  free(mname);
 
   property.mSelector = kAudioObjectPropertyName;
   result = AudioObjectGetPropertyData( id, &property, 0, NULL, &dataSize, &cfname );
@@ -1256,14 +1259,17 @@ bool RtApiCore :: probeDeviceInfo( AudioDeviceID id, RtAudio::DeviceInfo& info )
 
   length = CFStringGetLength(cfname);
   char *name = (char *)malloc(length * 3 + 1);
+  if ( name ) {
+    name[0] = '\0'; // valid string even if the conversion below fails
 #if defined( UNICODE ) || defined( _UNICODE )
-  CFStringGetCString(cfname, name, length * 3 + 1, kCFStringEncodingUTF8);
+    CFStringGetCString(cfname, name, length * 3 + 1, kCFStringEncodingUTF8);
 #else
-  CFStringGetCString(cfname, name, length * 3 + 1, CFStringGetSystemEncoding());
+    CFStringGetCString(cfname, name, length * 3 + 1, CFStringGetSystemEncoding());
 #endif
-  info.name.append( (const char *)name, strlen(name) );
+    info.name.append( (const char *)name, strlen(name) );
+    free(name);
+  }
   CFRelease( cfname );
-  free(name);
 
   // Get the output stream "configuration".
   AudioBufferList	*bufferList = nil;
@@ -2042,11 +2048,14 @@ void RtApiCore :: closeStream( void )
     stream_.deviceBuffer = 0;
   }
 
-  // Destroy pthread condition variable.
-  pthread_cond_signal( &handle->condition ); // signal condition variable in case stopStream is blocked
-  pthread_cond_destroy( &handle->condition );
-  delete handle;
-  stream_.apiHandle = 0;
+  // Destroy pthread condition variable.  handle may be null if closeStream()
+  // is reached via the error path of probeDeviceOpen() before apiHandle was set.
+  if ( handle ) {
+    pthread_cond_signal( &handle->condition ); // signal condition variable in case stopStream is blocked
+    pthread_cond_destroy( &handle->condition );
+    delete handle;
+    stream_.apiHandle = 0;
+  }
 
   CallbackInfo *info = (CallbackInfo *) &stream_.callbackInfo;
   if ( info->deviceDisconnected ) {
@@ -2854,7 +2863,8 @@ bool RtApiJack :: probeDeviceOpen( unsigned int deviceId, StreamMode mode, unsig
 
   // Get the latency of the JACK port.
   ports = jack_get_ports( client, escapeJackPortRegex(deviceName).c_str(), JACK_DEFAULT_AUDIO_TYPE, flag );
-  if ( ports[ firstChannel ] ) {
+  // jack_get_ports() returns null when no ports match the query.
+  if ( ports && ports[ firstChannel ] ) {
     // Added by Ge Wang
     jack_latency_callback_mode_t cbmode = (mode == INPUT ? JackCaptureLatency : JackPlaybackLatency);
     // the range (usually the min and max are equal)
@@ -9416,6 +9426,7 @@ bool RtApiPulse::probeDeviceOpen( unsigned int deviceId, StreamMode mode,
                                   unsigned int *bufferSize, RtAudio::StreamOptions *options )
 {
   PulseAudioHandle *pah = 0;
+  bool handleAllocated = false; // true if this call created stream_.apiHandle
   unsigned long bufferBytes = 0;
   pa_sample_spec ss;
 
@@ -9541,17 +9552,19 @@ bool RtApiPulse::probeDeviceOpen( unsigned int deviceId, StreamMode mode,
   if ( stream_.doConvertBuffer[mode] ) setConvertInfo( mode, firstChannel );
 
   if ( !stream_.apiHandle ) {
-    PulseAudioHandle *pah = new PulseAudioHandle;
-    if ( !pah ) {
-      errorText_ = "RtApiPulse::probeDeviceOpen: error allocating memory for handle.";
-      goto error;
-    }
-
-    stream_.apiHandle = pah;
+    pah = new PulseAudioHandle;
     if ( pthread_cond_init( &pah->runnable_cv, NULL ) != 0 ) {
       errorText_ = "RtApiPulse::probeDeviceOpen: error creating condition variable.";
-      goto error;
+      // The condition variable was not initialized, so just free the handle
+      // (do not jump to the error label, which would destroy it).
+      delete pah;
+      pah = 0;
+      stream_.state = STREAM_CLOSED;
+      return FAILURE;
     }
+    // Only publish the handle once it is fully constructed.
+    stream_.apiHandle = pah;
+    handleAllocated = true;
   }
   pah = static_cast<PulseAudioHandle *>( stream_.apiHandle );
 
@@ -9667,7 +9680,13 @@ bool RtApiPulse::probeDeviceOpen( unsigned int deviceId, StreamMode mode,
   return SUCCESS;
  
  error:
-  if ( pah && stream_.callbackInfo.isRunning ) {
+  // Only tear down the handle if this call allocated it; otherwise it is
+  // shared with an already-open stream direction and closeStream() owns it.
+  // When handleAllocated is true the condition variable was initialized and
+  // no callback thread is running, so this is safe.
+  if ( pah && handleAllocated ) {
+    if ( pah->s_play ) pa_simple_free( pah->s_play );
+    if ( pah->s_rec ) pa_simple_free( pah->s_rec );
     pthread_cond_destroy( &pah->runnable_cv );
     delete pah;
     stream_.apiHandle = 0;
