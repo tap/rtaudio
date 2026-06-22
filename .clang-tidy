@@ -1,0 +1,29 @@
+# clang-tidy configuration for RtAudio.
+#
+# RtAudio is a mature single-file library that deliberately uses a C-style,
+# C++11 idiom, so the broad modernize-*/readability-* families are disabled to
+# avoid noise.  The enabled checks target correctness and safety: the static
+# analyzer, bug-prone patterns, portability and a few CERT/security rules.
+#
+# A handful of individual checks are turned off because they fire pervasively
+# on intentional patterns in this codebase (e.g. the many deliberate
+# unsigned->signed conversions in the buffer-conversion routines).
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  performance-*,
+  portability-*,
+  cert-err34-c,
+  cert-err52-cpp,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  -bugprone-branch-clone,
+  -bugprone-implicit-widening-of-multiplication-result,
+  -performance-no-int-to-ptr,
+  -performance-enum-size,
+  -performance-unnecessary-value-param
+
+WarningsAsErrors: ''
+HeaderFilterRegex: '(RtAudio|rtaudio_c).*'
+FormatStyle: none
