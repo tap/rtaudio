@@ -61,7 +61,7 @@ jobs:
     - name: CMake
       run:
         mkdir bld-cmake && cd bld-cmake
-        && cmake .. -DCMAKE_INSTALL_PREFIX=$PWD/inst -DRTAUDIO_API_OSS=OFF -DRTAUDIO_API_ALSA=OFF -DRTAUDIO_API_PULSE=OFF -DRTAUDIO_API_JACK=OFF -DRTAUDIO_API_${{matrix.APIcmake}}=ON && make VERBOSE=1 && make install && find inst
+        && cmake .. -DCMAKE_INSTALL_PREFIX=$PWD/inst -DRTAUDIO_WARNINGS_AS_ERRORS=ON -DRTAUDIO_API_OSS=OFF -DRTAUDIO_API_ALSA=OFF -DRTAUDIO_API_PULSE=OFF -DRTAUDIO_API_JACK=OFF -DRTAUDIO_API_${{matrix.APIcmake}}=ON && make VERBOSE=1 && make install && find inst
     - name: Meson
       run: meson bld-meson --prefix=$PWD/bld-meson/inst -Ddocs=true -Dalsa=disabled -Djack=disabled -Dpulse=disabled -Doss=false -D${{matrix.mesonapi}} && cd bld-meson && ninja -j1 -v install && find inst
 
@@ -79,7 +79,7 @@ jobs:
         && (../configure --prefix=$PWD/inst || (cat config.log; false))
         && make V=1 && make check && make install && find inst
     - name: CMake
-      run: mkdir bld-cmake && cd bld-cmake && cmake .. -DCMAKE_INSTALL_PREFIX=$PWD/inst && make VERBOSE=1 && make install && find inst
+      run: mkdir bld-cmake && cd bld-cmake && cmake .. -DCMAKE_INSTALL_PREFIX=$PWD/inst -DRTAUDIO_WARNINGS_AS_ERRORS=ON && make VERBOSE=1 && make install && find inst
     - name: Meson
       run: meson bld-meson --prefix=$PWD/bld-meson/inst && cd bld-meson && ninja -j1 -v install && find inst
 
@@ -88,10 +88,15 @@ jobs:
     strategy:
       matrix:
         include:
+          # WASAPI/DirectSound compile only our code, so they enforce -Werror.
+          # ASIO pulls in the vendored Steinberg SDK sources, which we do not
+          # own and which emit their own warnings, so it is not -Werror.
           - host: i686-w64-mingw32
             api: dsound
+            cxxflags: -Werror
           - host: x86_64-w64-mingw32
             api: dsound
+            cxxflags: -Werror
           - host: i686-w64-mingw32
             api: asio
             cppflags: -Wno-unused-but-set-variable
@@ -100,8 +105,10 @@ jobs:
             cppflags: -Wno-unused-but-set-variable
           - host: i686-w64-mingw32
             api: wasapi
+            cxxflags: -Werror
           - host: x86_64-w64-mingw32
             api: wasapi
+            cxxflags: -Werror
     steps:
     - uses: actions/checkout@v2
       with:
@@ -112,7 +119,7 @@ jobs:
       run:
         env NOCONFIGURE=1 ./autogen.sh
         && mkdir bld-automake && cd bld-automake
-        && (../configure --prefix=$PWD/inst --host=${{matrix.host}} --with-${{matrix.api}} CPPFLAGS=${{matrix.cppflags}} || (cat config.log; false))
+        && (../configure --prefix=$PWD/inst --host=${{matrix.host}} --with-${{matrix.api}} CPPFLAGS=${{matrix.cppflags}} CXXFLAGS=${{matrix.cxxflags}} || (cat config.log; false))
         && make V=1 && make install && find inst
 
   # Build with AddressSanitizer + UndefinedBehaviorSanitizer and run the test
