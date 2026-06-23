@@ -87,6 +87,26 @@ Another backend pass (compile-verified by CI; not runtime-tested here).
   checked; a failed `CreateEvent` errors out of `probeDeviceOpen` instead of
   leaving a NULL handle that breaks drain signaling.
 
+### Warnings-as-errors across the matrix (`Phase 5`)
+
+`-Werror` is now enforced on **our** code on every platform, not just the
+portable core: the Linux (ALSA/Pulse/JACK/OSS) and macOS (CoreAudio) CMake
+builds set `RTAUDIO_WARNINGS_AS_ERRORS=ON`, and the MinGW WASAPI/DirectSound
+builds pass `CXXFLAGS=-Werror`. `-Wvla` was added to the GCC/Clang flags so
+variable-length arrays are rejected everywhere (GCC does not flag them under
+`-Wall`/`-Wextra`).
+
+Turning the gate on surfaced only **four** pre-existing issues, all VLAs (the
+backends were otherwise clean under `-Wall -Wextra`):
+
+* CoreAudio `probeDevices` / `probeDeviceInfo` — `AudioDeviceID ids[nDevices]`,
+  `AudioValueRange rangeList[nRanges]` → `std::vector`.
+* ALSA `callbackEvent` — `void *bufs[channels]` (read and write paths) →
+  `std::vector`.
+
+MinGW **ASIO** remains the one non-`-Werror` configuration because it also
+compiles the vendored Steinberg ASIO SDK sources, which we do not own.
+
 ## Known / deferred findings
 
 These remain open. Severity: 🔴 critical, 🟠 high, 🟡 medium.
