@@ -57,34 +57,33 @@ cross-builds) but, lacking the target hardware here, were **not** runtime-tested
 
 ## Known / deferred findings
 
-These are real but remain deliberately **not** changed because the correct fix
-changes cross-cutting runtime behaviour and cannot be validated without the
-target hardware. Recorded for a follow-up that can test on-device.
-Severity: 🔴 critical, 🟠 high, 🟡 medium.
+### Fixed defects (`Phase 3`)
 
-* 🟠 **WASAPI/other realtime threads read `stream_.state` without
-  synchronization** (`wasapiThread`, ~5911/6219). `stream_.state` is a plain
-  enum shared between the audio thread and control thread. Making it atomic is
-  a cross-cutting change (~180 use sites across every backend) and was left for
-  a dedicated pass; the WASAPI ring-buffer indices (the more concrete race) are
-  now atomic (H-5a).
-* 🟠 **JACK duplex-input error path tears down the shared output client**
-  (~RtAudio.cpp:2996) and **`jackXrun` can run after the handle is freed** when
-  `closeStream()` deletes without `jack_deactivate` first (~2965).
-* 🟠 **ASIO process-global state** (`drivers`, `asioCallbackInfo`, `streamOpen`)
-  is unsynchronized and never cleared in `closeStream()` → stale-pointer
-  deref from `asioMessages`/`sampleRateChanged`, and a second instance corrupts
-  the first.
-* 🟡 **OSS uses fd `0` as the "unused" sentinel** (`OssHandle::id[]`), but `0`
-  is a valid descriptor → fd leak / mishandling. Use `-1`.
+Another backend pass (compile-verified by CI; not runtime-tested here).
+
+| ID  | Area  | Defect                                                                          | Status |
+|-----|-------|---------------------------------------------------------------------------------|--------|
+| H-5 | core  | `stream_.state` was a plain enum read by the realtime callback thread and written by the control thread. | Fixed: now `std::atomic<StreamState>` (all ~180 access sites are plain load/store, so the type change is transparent). |
+| H-4 | JACK  | `closeStream()` only called `jack_deactivate` when `state == RUNNING`, leaving a window where the realtime xrun callback runs against freed ports. | Fixed: always deactivates before unregistering ports / freeing the handle. |
+| H-2 | JACK  | The duplex INPUT error path tore down the client/handle shared with the already-open OUTPUT pass. | Fixed: the error path only frees the handle when this call allocated it. |
+| H-3 | ASIO  | The process-global `asioCallbackInfo` was never cleared in `closeStream()`, so a late `sampleRateChanged`/`asioMessages`/`bufferSwitch` dereferenced freed state. | Fixed: cleared on close and NULL-checked in all three driver callbacks. |
+| M-1 | OSS   | `OssHandle::id[]` used `0` as the "unused" sentinel, but `0` is a valid descriptor → fd leak / mishandling. | Fixed: uses `-1`; close checks are now `>= 0`. |
+
+## Known / deferred findings
+
+These remain open. Severity: 🔴 critical, 🟠 high, 🟡 medium.
+
+* 🟡 **ASIO single-instance guard** (`streamOpen`) is a plain `bool` with a
+  check-then-set race if two `RtApiAsio` instances open concurrently. ASIO is
+  effectively single-driver, so this is low-impact; left as-is.
 * 🟡 Various ignored return codes (ALSA `snd_pcm_drop`, OSS `SNDCTL_*` ioctls,
   WASAPI/DS `CreateEvent`/`CoCreateInstance`), narrowing in the WASAPI ring
   buffer, and `pthread_cond_wait` drain handshakes that are not predicate loops.
 
 ## Suggested next steps
 
-1. Address the 🔴 items on real hardware (CoreAudio disconnect threading,
-   WASAPI resampler guards + atomics, DirectSound leak).
+1. Runtime-validate the Phase 2/3 backend fixes on real hardware (CoreAudio
+   disconnect, WASAPI resampler + atomics, DirectSound, JACK, ASIO, OSS).
 2. Drive `clang-tidy`/`cppcheck` toward zero findings per backend, then make the
    static-analysis job blocking.
 3. Add a native MSVC CI job (the current Windows coverage is MinGW cross-builds

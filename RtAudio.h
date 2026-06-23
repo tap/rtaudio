@@ -84,6 +84,7 @@
 #include <iostream>
 #include <functional>
 #include <memory>
+#include <atomic>
 
 namespace rt {
 namespace audio {
@@ -835,7 +836,9 @@ protected:
     unsigned int deviceId[2];  // Playback and record, respectively.
     void *apiHandle;           // void pointer for API specific stream handle information
     StreamMode mode;           // OUTPUT, INPUT, or DUPLEX.
-    StreamState state;         // STOPPED, RUNNING, or CLOSED
+    // Atomic: read by the realtime callback thread and written by the control
+    // thread (e.g. stopStream) without holding the stream mutex.
+    std::atomic<StreamState> state; // STOPPED, RUNNING, or CLOSED
     char *userBuffer[2];       // Playback and record, respectively.
     char *deviceBuffer;
     bool doConvertBuffer[2];   // Playback and record, respectively.

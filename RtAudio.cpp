@@ -2811,6 +2811,7 @@ bool RtApiJack :: probeDeviceOpen( unsigned int deviceId, StreamMode mode, unsig
                                    RtAudio::StreamOptions *options )
 {
   JackHandle *handle = (JackHandle *) stream_.apiHandle;
+  bool handleAllocated = false; // true if this call created stream_.apiHandle
 
   // Look for jack server and try to become a client (only do once per stream).
   jack_client_t *client = 0;
@@ -2937,6 +2938,7 @@ bool RtApiJack :: probeDeviceOpen( unsigned int deviceId, StreamMode mode, unsig
     }
     stream_.apiHandle = (void *) handle;
     handle->client = client;
+    handleAllocated = true;
   }
   handle->deviceName[mode] = deviceName;
 
@@ -3022,7 +3024,11 @@ bool RtApiJack :: probeDeviceOpen( unsigned int deviceId, StreamMode mode, unsig
   return SUCCESS;
 
  error:
-  if ( handle ) {
+  // Only tear down the handle/client if this call allocated it. On a duplex
+  // open the INPUT pass shares the handle and client created by the OUTPUT
+  // pass; destroying them here would tear down the already-open output stream.
+  // In that case leave the handle for closeStream() to own.
+  if ( handle && handleAllocated ) {
     pthread_cond_destroy( &handle->condition );
     jack_client_close( handle->client );
 
@@ -3058,8 +3064,10 @@ void RtApiJack :: closeStream( void )
 
   JackHandle *handle = (JackHandle *) stream_.apiHandle;
   if ( handle ) {
-    if ( stream_.state == STREAM_RUNNING )
-      jack_deactivate( handle->client );
+    // Always deactivate before unregistering ports and freeing the handle so
+    // the realtime process/xrun callbacks cannot run against freed state.
+    // jack_deactivate() on an already-inactive client is harmless.
+    jack_deactivate( handle->client );
 
     if ( stream_.mode == OUTPUT || stream_.mode == DUPLEX ) {
       for ( unsigned int i=0; i<stream_.nUserChannels[0]; i++ )
@@ -3572,6 +3580,7 @@ bool RtApiAsio :: probeDeviceInfo( RtAudio::DeviceInfo &info )
 
 static void bufferSwitch( long index, ASIOBool /*processNow*/ )
 {
+  if ( asioCallbackInfo == 0 ) return; // stream closed; callback raced teardown
   RtApiAsio *object = (RtApiAsio *) asioCallbackInfo->object;
   object->callbackEvent( index );
 }
@@ -4013,6 +4022,10 @@ void RtApiAsio :: closeStream()
   
   clearStreamInfo();
   streamOpen = false;
+  // Clear the global callback pointer so a late ASIO driver callback
+  // (sampleRateChanged / asioMessages / bufferSwitch) cannot dereference the
+  // now-destroyed stream state.
+  asioCallbackInfo = 0;
   //stream_.mode = UNINITIALIZED;
   //stream_.state = STREAM_CLOSED;
 }
@@ -4285,6 +4298,7 @@ static void sampleRateChanged( ASIOSampleRate sRate )
   // sample rate status of an AES/EBU or S/PDIF digital input at the
   // audio device.
 
+  if ( asioCallbackInfo == 0 ) return; // stream closed; callback raced teardown
   RtApi *object = (RtApi *) asioCallbackInfo->object;
   if ( object->getStreamSampleRate() != sRate ) {
     asioCallbackInfo->deviceDisconnected = true; // flag for either rate change or disconnect
@@ -4320,10 +4334,12 @@ static long asioMessages( long selector, long value, void* /*message*/, double* 
     // function return before attempting to close the stream and
     // remove the driver. Thus, we invoke a thread to initiate the
     // stream closing.
-    asioCallbackInfo->deviceDisconnected = true; // flag for either rate change or disconnect
-    unsigned threadId;
-    asioCallbackInfo->thread = _beginthreadex( NULL, 0, &asioStopStream,
-                                               asioCallbackInfo, 0, &threadId );
+    if ( asioCallbackInfo ) { // null if the stream was already closed
+      asioCallbackInfo->deviceDisconnected = true; // flag for either rate change or disconnect
+      unsigned threadId;
+      asioCallbackInfo->thread = _beginthreadex( NULL, 0, &asioStopStream,
+                                                 asioCallbackInfo, 0, &threadId );
+    }
     //std::cerr << "\nRtApiAsio: driver reset requested!!!" << std::endl;
     ret = 1L;
     break;
@@ -10016,8 +10032,9 @@ struct OssHandle {
   bool triggered;
   pthread_cond_t runnable;
 
+  // id[] uses -1 (not 0) as the "unused" sentinel: 0 is a valid descriptor.
   OssHandle()
-    :triggered(false) { id[0] = 0; id[1] = 0; xrun[0] = false; xrun[1] = false; }
+    :triggered(false) { id[0] = -1; id[1] = -1; xrun[0] = false; xrun[1] = false; }
 };
 
 RtApiOss :: RtApiOss()
@@ -10239,8 +10256,8 @@ bool RtApiOss :: probeDeviceOpen( unsigned int deviceId, StreamMode mode, unsign
   else { // mode == INPUT
     if (stream_.mode == OUTPUT && stream_.deviceId[0] == device) {
       // We just set the same device for playback ... close and reopen for duplex (OSS only).
-      close( handle->id[0] );
-      handle->id[0] = 0;
+      if ( handle->id[0] >= 0 ) close( handle->id[0] );
+      handle->id[0] = -1;
       if ( !( ainfo.caps & PCM_CAP_DUPLEX ) ) {
         errorStream_ << "RtApiOss::probeDeviceOpen: device (" << ainfo.name << ") does not support duplex mode.";
         errorText_ = errorStream_.str();
@@ -10600,8 +10617,8 @@ bool RtApiOss :: probeDeviceOpen( unsigned int deviceId, StreamMode mode, unsign
  error:
   if ( handle ) {
     pthread_cond_destroy( &handle->runnable );
-    if ( handle->id[0] ) close( handle->id[0] );
-    if ( handle->id[1] ) close( handle->id[1] );
+    if ( handle->id[0] >= 0 ) close( handle->id[0] );
+    if ( handle->id[1] >= 0 ) close( handle->id[1] );
     delete handle;
     stream_.apiHandle = 0;
   }
@@ -10648,8 +10665,8 @@ void RtApiOss :: closeStream()
 
   if ( handle ) {
     pthread_cond_destroy( &handle->runnable );
-    if ( handle->id[0] ) close( handle->id[0] );
-    if ( handle->id[1] ) close( handle->id[1] );
+    if ( handle->id[0] >= 0 ) close( handle->id[0] );
+    if ( handle->id[1] >= 0 ) close( handle->id[1] );
     delete handle;
     stream_.apiHandle = 0;
   }
