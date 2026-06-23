@@ -3815,6 +3815,10 @@ bool RtApiAsio :: probeDeviceOpen( unsigned int deviceId, StreamMode mode, unsig
                                      TRUE,   // manual-reset
                                      FALSE,  // non-signaled initially
                                      NULL ); // unnamed
+    if ( handle->condition == NULL ) {
+      errorText_ = "RtApiAsio::probeDeviceOpen: error creating condition event.";
+      goto error;
+    }
     stream_.apiHandle = (void *) handle;
   }
 
@@ -4530,8 +4534,10 @@ public:
     }
 
     // copy buffer from external to internal
-    int fromZeroSize = inIndex_ + bufferSize - bufferSize_;
-    fromZeroSize = fromZeroSize < 0 ? 0 : fromZeroSize;
+    // Compute in signed 64-bit to avoid an implementation-defined unsigned->int
+    // narrowing; the result is small (<= bufferSize) after clamping.
+    long long fromZero = (long long) inIndex_ + bufferSize - bufferSize_;
+    int fromZeroSize = fromZero < 0 ? 0 : (int) fromZero;
     int fromInSize = bufferSize - fromZeroSize;
 
     switch( format )
@@ -4592,8 +4598,10 @@ public:
     }
 
     // copy buffer from internal to external
-    int fromZeroSize = outIndex_ + bufferSize - bufferSize_;
-    fromZeroSize = fromZeroSize < 0 ? 0 : fromZeroSize;
+    // Compute in signed 64-bit to avoid an implementation-defined unsigned->int
+    // narrowing; the result is small (<= bufferSize) after clamping.
+    long long fromZero = (long long) outIndex_ + bufferSize - bufferSize_;
+    int fromZeroSize = fromZero < 0 ? 0 : (int) fromZero;
     int fromOutSize = bufferSize - fromZeroSize;
 
     switch( format )
@@ -7046,6 +7054,10 @@ bool RtApiDs :: probeDeviceOpen( unsigned int deviceId, StreamMode mode, unsigne
                                      TRUE,   // manual-reset
                                      FALSE,  // non-signaled initially
                                      NULL ); // unnamed
+    if ( handle->condition == NULL ) {
+      errorText_ = "RtApiDs::probeDeviceOpen: error creating condition event.";
+      goto error;
+    }
     stream_.apiHandle = (void *) handle;
   }
   else
@@ -10908,11 +10920,14 @@ void RtApiOss :: callbackEvent()
 
     if ( stream_.mode == DUPLEX && handle->triggered == false ) {
       int trig = 0;
-      ioctl( handle->id[0], SNDCTL_DSP_SETTRIGGER, &trig );
+      int trigResult = ioctl( handle->id[0], SNDCTL_DSP_SETTRIGGER, &trig );
       result = write( handle->id[0], buffer, samples * formatBytes(format) );
       trig = PCM_ENABLE_INPUT|PCM_ENABLE_OUTPUT;
-      ioctl( handle->id[0], SNDCTL_DSP_SETTRIGGER, &trig );
-      handle->triggered = true;
+      if ( ioctl( handle->id[0], SNDCTL_DSP_SETTRIGGER, &trig ) != -1 &&
+           trigResult != -1 )
+        // Only mark the duplex trigger as armed if both ioctls succeeded;
+        // otherwise input/output were not actually synchronized.
+        handle->triggered = true;
     }
     else
       // Write samples to device.

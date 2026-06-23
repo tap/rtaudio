@@ -55,8 +55,6 @@ cross-builds) but, lacking the target hardware here, were **not** runtime-tested
 | C-4 | DirectSound | Device/buffer COM objects leaked on open failures that occurred after creation but before they were stored in the handle. | Fixed: the error path releases the still-owned objects. |
 | H-5a| WASAPI      | SPSC ring-buffer indices (`inIndex_`/`outIndex_`) were plain `unsigned int` shared across threads → data race. | Fixed: now `std::atomic<unsigned int>`. |
 
-## Known / deferred findings
-
 ### Fixed defects (`Phase 3`)
 
 Another backend pass (compile-verified by CI; not runtime-tested here).
@@ -69,6 +67,26 @@ Another backend pass (compile-verified by CI; not runtime-tested here).
 | H-3 | ASIO  | The process-global `asioCallbackInfo` was never cleared in `closeStream()`, so a late `sampleRateChanged`/`asioMessages`/`bufferSwitch` dereferenced freed state. | Fixed: cleared on close and NULL-checked in all three driver callbacks. |
 | M-1 | OSS   | `OssHandle::id[]` used `0` as the "unused" sentinel, but `0` is a valid descriptor → fd leak / mishandling. | Fixed: uses `-1`; close checks are now `>= 0`. |
 
+### Tests and findings (`Phase 4`)
+
+* **Conversion tests** (`tests/convtest.cpp`): a dependency-free test that
+  reaches the protected `convertBuffer`/`byteSwapBuffer` routines through a
+  minimal `RtApi` subclass (no library change). Covers byte-swapping, the
+  formerly-UB signed left-shift conversions (with known negative-value results),
+  format round-trips, and channel mapping. This is the runtime validation of the
+  Phase 1 `convertBuffer` UB fix that was previously only review-verified — it
+  passes under `-fsanitize=address,undefined`. `tests/unittest.cpp` also gained
+  a C-API instance lifecycle smoke test.
+* **M-7 WASAPI ring-buffer narrowing** — the wrap-size computation
+  (`inIndex_ + bufferSize - bufferSize_`) was done in unsigned then narrowed to
+  `int` (implementation-defined). Now computed in signed 64-bit and clamped.
+* **OSS duplex trigger** — `SNDCTL_DSP_SETTRIGGER` ioctl results are now checked,
+  and `handle->triggered` is only set when both succeed (previously it was set
+  unconditionally even if the input/output sync failed).
+* **DirectSound / ASIO `CreateEvent`** — the drain/condition event handle is now
+  checked; a failed `CreateEvent` errors out of `probeDeviceOpen` instead of
+  leaving a NULL handle that breaks drain signaling.
+
 ## Known / deferred findings
 
 These remain open. Severity: 🔴 critical, 🟠 high, 🟡 medium.
@@ -76,9 +94,10 @@ These remain open. Severity: 🔴 critical, 🟠 high, 🟡 medium.
 * 🟡 **ASIO single-instance guard** (`streamOpen`) is a plain `bool` with a
   check-then-set race if two `RtApiAsio` instances open concurrently. ASIO is
   effectively single-driver, so this is low-impact; left as-is.
-* 🟡 Various ignored return codes (ALSA `snd_pcm_drop`, OSS `SNDCTL_*` ioctls,
-  WASAPI/DS `CreateEvent`/`CoCreateInstance`), narrowing in the WASAPI ring
-  buffer, and `pthread_cond_wait` drain handshakes that are not predicate loops.
+* 🟡 Remaining ignored return codes (ALSA `snd_pcm_drop`, some
+  `CoCreateInstance` call sites) and the CoreAudio/JACK `pthread_cond_wait`
+  drain handshakes that are not predicate loops (changing them alters wait
+  semantics, so they need on-hardware validation).
 
 ## Suggested next steps
 

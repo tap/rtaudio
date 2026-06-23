@@ -164,11 +164,40 @@ static void testCApiNames()
   CHECK( rtaudio_version() != nullptr );
 }
 
+// ---------------------------------------------------------------------------
+// C API instance lifecycle: create/query/destroy without opening a stream
+// (no audio device required).
+// ---------------------------------------------------------------------------
+static void testCApiLifecycle()
+{
+  // UNSPECIFIED selects the first compiled API.
+  rtaudio_t audio = rtaudio_create( RTAUDIO_API_UNSPECIFIED );
+  CHECK( audio != nullptr );
+  if ( !audio )
+    return;
+
+  // A freshly created instance has no error and no open/running stream.
+  CHECK( rtaudio_error_type( audio ) == RTAUDIO_ERROR_NONE );
+  CHECK( rtaudio_error( audio ) == nullptr );
+  CHECK( rtaudio_is_stream_open( audio ) == 0 );
+  CHECK( rtaudio_is_stream_running( audio ) == 0 );
+
+  // current_api() is a valid enum value.
+  rtaudio_api_t api = rtaudio_current_api( audio );
+  CHECK( api >= 0 && api < RTAUDIO_API_NUM );
+
+  // device_count() must not crash and is non-negative.
+  CHECK( rtaudio_device_count( audio ) >= 0 );
+
+  rtaudio_destroy( audio );
+}
+
 int main()
 {
   testErrorMessageCopy();
   testCxxApiNames();
   testCApiNames();
+  testCApiLifecycle();
 
   if ( g_failures == 0 ) {
     std::cout << "All " << g_checks << " checks passed." << std::endl;
