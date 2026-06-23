@@ -9094,11 +9094,11 @@ void RtApiAlsa :: callbackEvent()
     if ( stream_.deviceInterleaved[1] )
       result = snd_pcm_readi( handle[1], buffer, stream_.bufferSize );
     else {
-      void *bufs[channels];
+      std::vector<void *> bufs( channels ); // avoid a non-portable VLA
       size_t offset = stream_.bufferSize * formatBytes( format );
       for ( int i=0; i<channels; i++ )
         bufs[i] = (void *) (buffer + (i * offset));
-      result = snd_pcm_readn( handle[1], bufs, stream_.bufferSize );
+      result = snd_pcm_readn( handle[1], bufs.data(), stream_.bufferSize );
     }
 
     if ( result < (int) stream_.bufferSize ) {
@@ -9164,11 +9164,11 @@ void RtApiAlsa :: callbackEvent()
     if ( stream_.deviceInterleaved[0] )
       result = snd_pcm_writei( handle[0], buffer, stream_.bufferSize );
     else {
-      void *bufs[channels];
+      std::vector<void *> bufs( channels ); // avoid a non-portable VLA
       size_t offset = stream_.bufferSize * formatBytes( format );
       for ( int i=0; i<channels; i++ )
         bufs[i] = (void *) (buffer + (i * offset));
-      result = snd_pcm_writen( handle[0], bufs, stream_.bufferSize );
+      result = snd_pcm_writen( handle[0], bufs.data(), stream_.bufferSize );
     }
 
     if ( result < (int) stream_.bufferSize ) {
