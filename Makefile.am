@@ -28,6 +28,9 @@ rtaudio_inc_HEADERS = \
   %D%/RtAudio.h \
   %D%/rtaudio_c.h
 
+# Internal header (not installed) shared with the unit tests.
+noinst_HEADERS = %D%/rtaudio_c_private.h
+
 pkgconfigdatadir = $(libdir)/pkgconfig
 pkgconfigdata_DATA = rtaudio.pc
 

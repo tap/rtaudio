@@ -1,5 +1,5 @@
 
-noinst_PROGRAMS = audioprobe playsaw playraw record duplex apinames testall teststops
+noinst_PROGRAMS = audioprobe playsaw playraw record duplex apinames testall teststops unittest
 
 AM_CXXFLAGS = -Wall -I$(top_srcdir)
 
@@ -27,6 +27,9 @@ testall_LDADD = $(top_builddir)/librtaudio.la
 teststops_SOURCES = teststops.cpp
 teststops_LDADD = $(top_builddir)/librtaudio.la
 
+unittest_SOURCES = unittest.cpp
+unittest_LDADD = $(top_builddir)/librtaudio.la
+
 EXTRA_DIST = Windows CMakeLists.txt
 
-TESTS = apinames
+TESTS = apinames unittest

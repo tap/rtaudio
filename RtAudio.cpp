@@ -48,6 +48,7 @@
 #include <cwchar>
 #include <climits>
 #include <cmath>
+#include <atomic>
 #include <algorithm>
 #include <locale>
 
@@ -91,7 +92,10 @@ std::string convertCharPointerToStdString(const wchar_t* text)
   return nret;
 #else
   std::string result;
-  char dest[MB_CUR_MAX];
+  // MB_LEN_MAX is the locale-independent compile-time upper bound on the
+  // number of bytes in a multibyte character; using it (rather than the
+  // runtime MB_CUR_MAX) keeps this a fixed-size array instead of a VLA.
+  char dest[MB_LEN_MAX];
   // get number of wide characters in text
   const size_t length = wcslen(text);
   for (size_t i = 0; i < length; i++) {
@@ -1101,6 +1105,15 @@ unsigned int RtApiCore :: getDefaultInputDevice( void )
 }
 
 // If a device used in an open stream is disconnected, close the stream.
+// Tears down the stream on its own thread; see streamDisconnectListener().
+static void *coreCloseStream( void *ptr )
+{
+  CallbackInfo *info = (CallbackInfo *) ptr;
+  RtApiCore *object = (RtApiCore *) info->object;
+  object->closeStream();
+  pthread_exit( NULL );
+}
+
 static OSStatus streamDisconnectListener( AudioObjectID /*id*/,
                                           UInt32 nAddresses,
                                           const AudioObjectPropertyAddress properties[],
@@ -1109,13 +1122,18 @@ static OSStatus streamDisconnectListener( AudioObjectID /*id*/,
   for ( UInt32 i=0; i<nAddresses; i++ ) {
     if ( properties[i].mSelector == kAudioDevicePropertyDeviceIsAlive ) {
       CallbackInfo *info = (CallbackInfo *) infoPointer;
-      RtApiCore *object = (RtApiCore *) info->object;
       info->deviceDisconnected = true;
-      object->closeStream();
+      // closeStream() must not run on this CoreAudio property-listener thread:
+      // it removes property listeners (which can deadlock when called from
+      // within a listener) and frees state shared with the audio callback.
+      // Spawn a detached thread to do the teardown and return immediately.
+      pthread_t threadId;
+      if ( pthread_create( &threadId, NULL, coreCloseStream, info ) == 0 )
+        pthread_detach( threadId );
       return kAudioHardwareUnspecifiedError;
     }
   }
-  
+
   return kAudioHardwareNoError;
 }
 
@@ -1232,15 +1250,18 @@ bool RtApiCore :: probeDeviceInfo( AudioDeviceID id, RtAudio::DeviceInfo& info )
 
   long length = CFStringGetLength(cfname);
   char *mname = (char *)malloc(length * 3 + 1);
+  if ( mname ) {
+    mname[0] = '\0'; // valid string even if the conversion below fails
 #if defined( UNICODE ) || defined( _UNICODE )
-  CFStringGetCString(cfname, mname, length * 3 + 1, kCFStringEncodingUTF8);
+    CFStringGetCString(cfname, mname, length * 3 + 1, kCFStringEncodingUTF8);
 #else
-  CFStringGetCString(cfname, mname, length * 3 + 1, CFStringGetSystemEncoding());
+    CFStringGetCString(cfname, mname, length * 3 + 1, CFStringGetSystemEncoding());
 #endif
-  info.name.append( (const char *)mname, strlen(mname) );
+    info.name.append( (const char *)mname, strlen(mname) );
+    free(mname);
+  }
   info.name.append( ": " );
   CFRelease( cfname );
-  free(mname);
 
   property.mSelector = kAudioObjectPropertyName;
   result = AudioObjectGetPropertyData( id, &property, 0, NULL, &dataSize, &cfname );
@@ -1253,14 +1274,17 @@ bool RtApiCore :: probeDeviceInfo( AudioDeviceID id, RtAudio::DeviceInfo& info )
 
   length = CFStringGetLength(cfname);
   char *name = (char *)malloc(length * 3 + 1);
+  if ( name ) {
+    name[0] = '\0'; // valid string even if the conversion below fails
 #if defined( UNICODE ) || defined( _UNICODE )
-  CFStringGetCString(cfname, name, length * 3 + 1, kCFStringEncodingUTF8);
+    CFStringGetCString(cfname, name, length * 3 + 1, kCFStringEncodingUTF8);
 #else
-  CFStringGetCString(cfname, name, length * 3 + 1, CFStringGetSystemEncoding());
+    CFStringGetCString(cfname, name, length * 3 + 1, CFStringGetSystemEncoding());
 #endif
-  info.name.append( (const char *)name, strlen(name) );
+    info.name.append( (const char *)name, strlen(name) );
+    free(name);
+  }
   CFRelease( cfname );
-  free(name);
 
   // Get the output stream "configuration".
   AudioBufferList	*bufferList = nil;
@@ -2039,11 +2063,14 @@ void RtApiCore :: closeStream( void )
     stream_.deviceBuffer = 0;
   }
 
-  // Destroy pthread condition variable.
-  pthread_cond_signal( &handle->condition ); // signal condition variable in case stopStream is blocked
-  pthread_cond_destroy( &handle->condition );
-  delete handle;
-  stream_.apiHandle = 0;
+  // Destroy pthread condition variable.  handle may be null if closeStream()
+  // is reached via the error path of probeDeviceOpen() before apiHandle was set.
+  if ( handle ) {
+    pthread_cond_signal( &handle->condition ); // signal condition variable in case stopStream is blocked
+    pthread_cond_destroy( &handle->condition );
+    delete handle;
+    stream_.apiHandle = 0;
+  }
 
   CallbackInfo *info = (CallbackInfo *) &stream_.callbackInfo;
   if ( info->deviceDisconnected ) {
@@ -2851,7 +2878,8 @@ bool RtApiJack :: probeDeviceOpen( unsigned int deviceId, StreamMode mode, unsig
 
   // Get the latency of the JACK port.
   ports = jack_get_ports( client, escapeJackPortRegex(deviceName).c_str(), JACK_DEFAULT_AUDIO_TYPE, flag );
-  if ( ports[ firstChannel ] ) {
+  // jack_get_ports() returns null when no ports match the query.
+  if ( ports && ports[ firstChannel ] ) {
     // Added by Ge Wang
     jack_latency_callback_mode_t cbmode = (mode == INPUT ? JackCaptureLatency : JackPlaybackLatency);
     // the range (usually the min and max are equal)
@@ -4519,8 +4547,8 @@ public:
     }
 
     // update "in" index
-    inIndex_ += bufferSize;
-    inIndex_ %= bufferSize_;
+    // std::atomic has no %=; compute and store (publishes the written data).
+    inIndex_ = ( inIndex_ + bufferSize ) % bufferSize_;
 
     return true;
   }
@@ -4581,8 +4609,8 @@ public:
     }
 
     // update "out" index
-    outIndex_ += bufferSize;
-    outIndex_ %= bufferSize_;
+    // std::atomic has no %=; compute and store (frees space for the producer).
+    outIndex_ = ( outIndex_ + bufferSize ) % bufferSize_;
 
     return true;
   }
@@ -4590,8 +4618,11 @@ public:
 private:
   char* buffer_;
   unsigned int bufferSize_;
-  unsigned int inIndex_;
-  unsigned int outIndex_;
+  // inIndex_ is written only by the producer, outIndex_ only by the consumer,
+  // but each is read by the other thread, so they are atomic to avoid a data
+  // race (and torn/stale reads of the ring-buffer fill level).
+  std::atomic<unsigned int> inIndex_;
+  std::atomic<unsigned int> outIndex_;
 };
 
 //-----------------------------------------------------------------------------
@@ -4626,12 +4657,21 @@ public:
     CoCreateInstance( CLSID_CResamplerMediaObject, NULL, CLSCTX_INPROC_SERVER,
                       IID_IUnknown, ( void** ) &_transformUnk );
 
-    _transformUnk->QueryInterface( IID_PPV_ARGS( &_transform ) );
+    // If the resampler MFT is unavailable, _transformUnk stays NULL; guard the
+    // rest of the setup so we do not dereference a NULL interface here or on the
+    // realtime audio thread. isValid() lets callers detect the failure.
+    if ( _transformUnk )
+      _transformUnk->QueryInterface( IID_PPV_ARGS( &_transform ) );
 
     #ifdef __IWMResamplerProps_FWD_DEFINED__
-      _transformUnk->QueryInterface( IID_PPV_ARGS( &_resamplerProps ) );
-      _resamplerProps->SetHalfFilterLength( 60 ); // best conversion quality
+      if ( _transformUnk )
+        _transformUnk->QueryInterface( IID_PPV_ARGS( &_resamplerProps ) );
+      if ( _resamplerProps )
+        _resamplerProps->SetHalfFilterLength( 60 ); // best conversion quality
     #endif
+
+    if ( !_transform )
+      return;
 
     // 3. Specify input / output format
 
@@ -4669,20 +4709,26 @@ public:
   {
     // 8. Send stream stop messages to Resampler
 
-    _transform->ProcessMessage( MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0 );
-    _transform->ProcessMessage( MFT_MESSAGE_NOTIFY_END_STREAMING, 0 );
+    if ( _transform )
+    {
+      _transform->ProcessMessage( MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0 );
+      _transform->ProcessMessage( MFT_MESSAGE_NOTIFY_END_STREAMING, 0 );
+    }
 
     // 9. Cleanup
 
     MFShutdown();
   }
 
+  // True if the underlying resampler MFT was created successfully.
+  bool isValid() const { return _transform != NULL; }
+
   void Convert( char* outBuffer, const char* inBuffer, unsigned int inSampleCount, unsigned int& outSampleCount, int maxOutSampleCount = -1 )
   {
     unsigned int inputBufferSize = _bytesPerSample * _channelCount * inSampleCount;
-    if ( _sampleRatio == 1 )
+    if ( _sampleRatio == 1 || !_transform )
     {
-      // no sample rate conversion required
+      // no sample rate conversion required (or resampler unavailable)
       memcpy( outBuffer, inBuffer, inputBufferSize );
       outSampleCount = inSampleCount;
       return;
@@ -4752,6 +4798,11 @@ public:
 
     rOutDataBuffer.pSample->ConvertToContiguousBuffer( &rOutBuffer );
     rOutBuffer->GetCurrentLength( &rBytes );
+
+    // Never write more than the caller's output buffer can hold: the resampler
+    // can emit more frames than requested at chunk boundaries.
+    if ( rBytes > outputBufferSize )
+      rBytes = outputBufferSize;
 
     rOutBuffer->Lock( &rOutByteBuffer, NULL, NULL );
     memcpy( outBuffer, rOutByteBuffer, rBytes );
@@ -6985,6 +7036,8 @@ bool RtApiDs :: probeDeviceOpen( unsigned int deviceId, StreamMode mode, unsigne
     handle = (DsHandle *) stream_.apiHandle;
   handle->id[mode] = ohandle;
   handle->buffer[mode] = bhandle;
+  ohandle = 0; // ownership transferred to handle; clear so the error path
+  bhandle = 0; // below does not double-release these objects
   handle->dsBufferSize[mode] = dsBufferSize;
   handle->dsPointerLeadTime[mode] = dsPointerLeadTime;
 
@@ -7035,6 +7088,26 @@ bool RtApiDs :: probeDeviceOpen( unsigned int deviceId, StreamMode mode, unsigne
     CloseHandle( handle->condition );
     delete handle;
     stream_.apiHandle = 0;
+  }
+
+  // Release the device/buffer objects created in this call if they were not
+  // yet transferred to the handle (e.g. an allocation failure between creating
+  // them and the assignment above). Otherwise they leak on every failed open.
+  if ( ohandle || bhandle ) {
+    if ( mode == OUTPUT ) {
+      LPDIRECTSOUNDBUFFER buffer = (LPDIRECTSOUNDBUFFER) bhandle;
+      LPDIRECTSOUND object = (LPDIRECTSOUND) ohandle;
+      if ( buffer ) buffer->Release();
+      if ( object ) object->Release();
+    }
+    else { // INPUT
+      LPDIRECTSOUNDCAPTUREBUFFER buffer = (LPDIRECTSOUNDCAPTUREBUFFER) bhandle;
+      LPDIRECTSOUNDCAPTURE object = (LPDIRECTSOUNDCAPTURE) ohandle;
+      if ( buffer ) buffer->Release();
+      if ( object ) object->Release();
+    }
+    ohandle = 0;
+    bhandle = 0;
   }
 
   for ( int i=0; i<2; i++ ) {
@@ -9413,6 +9486,7 @@ bool RtApiPulse::probeDeviceOpen( unsigned int deviceId, StreamMode mode,
                                   unsigned int *bufferSize, RtAudio::StreamOptions *options )
 {
   PulseAudioHandle *pah = 0;
+  bool handleAllocated = false; // true if this call created stream_.apiHandle
   unsigned long bufferBytes = 0;
   pa_sample_spec ss;
 
@@ -9538,17 +9612,19 @@ bool RtApiPulse::probeDeviceOpen( unsigned int deviceId, StreamMode mode,
   if ( stream_.doConvertBuffer[mode] ) setConvertInfo( mode, firstChannel );
 
   if ( !stream_.apiHandle ) {
-    PulseAudioHandle *pah = new PulseAudioHandle;
-    if ( !pah ) {
-      errorText_ = "RtApiPulse::probeDeviceOpen: error allocating memory for handle.";
-      goto error;
-    }
-
-    stream_.apiHandle = pah;
+    pah = new PulseAudioHandle;
     if ( pthread_cond_init( &pah->runnable_cv, NULL ) != 0 ) {
       errorText_ = "RtApiPulse::probeDeviceOpen: error creating condition variable.";
-      goto error;
+      // The condition variable was not initialized, so just free the handle
+      // (do not jump to the error label, which would destroy it).
+      delete pah;
+      pah = 0;
+      stream_.state = STREAM_CLOSED;
+      return FAILURE;
     }
+    // Only publish the handle once it is fully constructed.
+    stream_.apiHandle = pah;
+    handleAllocated = true;
   }
   pah = static_cast<PulseAudioHandle *>( stream_.apiHandle );
 
@@ -9664,7 +9740,13 @@ bool RtApiPulse::probeDeviceOpen( unsigned int deviceId, StreamMode mode,
   return SUCCESS;
  
  error:
-  if ( pah && stream_.callbackInfo.isRunning ) {
+  // Only tear down the handle if this call allocated it; otherwise it is
+  // shared with an already-open stream direction and closeStream() owns it.
+  // When handleAllocated is true the condition variable was initialized and
+  // no callback thread is running, so this is safe.
+  if ( pah && handleAllocated ) {
+    if ( pah->s_play ) pa_simple_free( pah->s_play );
+    if ( pah->s_rec ) pa_simple_free( pah->s_rec );
     pthread_cond_destroy( &pah->runnable_cv );
     delete pah;
     stream_.apiHandle = 0;
@@ -11214,7 +11296,8 @@ void RtApi :: convertBuffer( char *outBuffer, char *inBuffer, ConvertInfo &info 
       for (unsigned int i=0; i<stream_.bufferSize; i++) {
         for (j=0; j<info.channels; j++) {
           out[info.outOffset[j]] = (Int32) in[info.inOffset[j]];
-          out[info.outOffset[j]] <<= 24;
+          // Shift via unsigned to avoid UB when the value is negative.
+          out[info.outOffset[j]] = (Int32) ( (uint32_t) out[info.outOffset[j]] << 24 );
         }
         in += info.inJump;
         out += info.outJump;
@@ -11225,7 +11308,8 @@ void RtApi :: convertBuffer( char *outBuffer, char *inBuffer, ConvertInfo &info 
       for (unsigned int i=0; i<stream_.bufferSize; i++) {
         for (j=0; j<info.channels; j++) {
           out[info.outOffset[j]] = (Int32) in[info.inOffset[j]];
-          out[info.outOffset[j]] <<= 16;
+          // Shift via unsigned to avoid UB when the value is negative.
+          out[info.outOffset[j]] = (Int32) ( (uint32_t) out[info.outOffset[j]] << 16 );
         }
         in += info.inJump;
         out += info.outJump;
@@ -11236,7 +11320,8 @@ void RtApi :: convertBuffer( char *outBuffer, char *inBuffer, ConvertInfo &info 
       for (unsigned int i=0; i<stream_.bufferSize; i++) {
         for (j=0; j<info.channels; j++) {
           out[info.outOffset[j]] = (Int32) in[info.inOffset[j]].asInt();
-          out[info.outOffset[j]] <<= 8;
+          // Shift via unsigned to avoid UB when the value is negative.
+          out[info.outOffset[j]] = (Int32) ( (uint32_t) out[info.outOffset[j]] << 8 );
         }
         in += info.inJump;
         out += info.outJump;
@@ -11281,8 +11366,7 @@ void RtApi :: convertBuffer( char *outBuffer, char *inBuffer, ConvertInfo &info 
       signed char *in = (signed char *)inBuffer;
       for (unsigned int i=0; i<stream_.bufferSize; i++) {
         for (j=0; j<info.channels; j++) {
-          out[info.outOffset[j]] = (Int32) (in[info.inOffset[j]] << 16);
-          //out[info.outOffset[j]] <<= 16;
+          out[info.outOffset[j]] = (Int32) ( (uint32_t) (int) in[info.inOffset[j]] << 16 );
         }
         in += info.inJump;
         out += info.outJump;
@@ -11292,8 +11376,7 @@ void RtApi :: convertBuffer( char *outBuffer, char *inBuffer, ConvertInfo &info 
       Int16 *in = (Int16 *)inBuffer;
       for (unsigned int i=0; i<stream_.bufferSize; i++) {
         for (j=0; j<info.channels; j++) {
-          out[info.outOffset[j]] = (Int32) (in[info.inOffset[j]] << 8);
-          //out[info.outOffset[j]] <<= 8;
+          out[info.outOffset[j]] = (Int32) ( (uint32_t) (int) in[info.inOffset[j]] << 8 );
         }
         in += info.inJump;
         out += info.outJump;
@@ -11349,7 +11432,8 @@ void RtApi :: convertBuffer( char *outBuffer, char *inBuffer, ConvertInfo &info 
       for (unsigned int i=0; i<stream_.bufferSize; i++) {
         for (j=0; j<info.channels; j++) {
           out[info.outOffset[j]] = (Int16) in[info.inOffset[j]];
-          out[info.outOffset[j]] <<= 8;
+          // Shift via unsigned to avoid UB when the value is negative.
+          out[info.outOffset[j]] = (Int16) ( (uint16_t) out[info.outOffset[j]] << 8 );
         }
         in += info.inJump;
         out += info.outJump;
@@ -11420,7 +11504,7 @@ void RtApi :: convertBuffer( char *outBuffer, char *inBuffer, ConvertInfo &info 
         out += info.outJump;
       }
     }
-    if (info.inFormat == RTAUDIO_SINT16) {
+    else if (info.inFormat == RTAUDIO_SINT16) {
       Int16 *in = (Int16 *)inBuffer;
       for (unsigned int i=0; i<stream_.bufferSize; i++) {
         for (j=0; j<info.channels; j++) {

@@ -69,17 +69,18 @@ endif ()
 option(RTAUDIO_BUILD_MODULES "Build C++ modules for RtAudio" OFF)
 option(RTAUDIO_USE_NAMESPACE "Force usage of namespace rt::audio for modules" ON)
 
-# Add -Wall if possible
-if (CMAKE_COMPILER_IS_GNUCXX)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall")
-endif (CMAKE_COMPILER_IS_GNUCXX)
+# Enable a useful set of compiler warnings on GCC/Clang.
+option(RTAUDIO_WARNINGS_AS_ERRORS "Treat compiler warnings as errors (for CI)" OFF)
+if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
+  if (RTAUDIO_WARNINGS_AS_ERRORS)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
+  endif ()
+endif ()
 
 # Add debug flags
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_definitions(-D__RTAUDIO_DEBUG__)
-  if (CMAKE_COMPILER_IS_GNUCXX)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
-  endif (CMAKE_COMPILER_IS_GNUCXX)
 endif ()
 
 # Read libtool version info from configure.ac

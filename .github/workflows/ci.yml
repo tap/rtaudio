@@ -114,3 +114,73 @@ jobs:
         && mkdir bld-automake && cd bld-automake
         && (../configure --prefix=$PWD/inst --host=${{matrix.host}} --with-${{matrix.api}} CPPFLAGS=${{matrix.cppflags}} || (cat config.log; false))
         && make V=1 && make install && find inst
+
+  # Build with AddressSanitizer + UndefinedBehaviorSanitizer and run the test
+  # suite. The registered tests (apinames, unittest) exercise the portable
+  # code paths and do not require an audio device.
+  Sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: install dependencies
+      run: sudo apt-get update && sudo apt-get install -y g++ cmake ninja-build libasound-dev
+    - name: build and test (ASan/UBSan)
+      run: |
+        cmake -S . -B bld-asan -G Ninja \
+          -DRTAUDIO_API_ALSA=ON -DRTAUDIO_BUILD_TESTING=ON \
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g"
+        cmake --build bld-asan -v
+        ctest --test-dir bld-asan --output-on-failure
+
+  # Strictly enforce a warning-clean, well-defined portable core. This builds
+  # the API-independent (dummy) configuration with -Wall -Wextra -Wpedantic
+  # -Werror on both GCC and Clang so portable regressions fail the build.
+  StrictWarnings:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        compiler: [g++, clang++]
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: install dependencies
+      run: sudo apt-get update && sudo apt-get install -y g++ clang cmake ninja-build
+    - name: build (warnings as errors)
+      env:
+        CXX: ${{matrix.compiler}}
+      run: |
+        cmake -S . -B bld-strict -G Ninja \
+          -DRTAUDIO_API_ALSA=OFF -DRTAUDIO_API_PULSE=OFF \
+          -DRTAUDIO_API_JACK=OFF -DRTAUDIO_API_OSS=OFF \
+          -DRTAUDIO_BUILD_TESTING=ON -DRTAUDIO_WARNINGS_AS_ERRORS=ON \
+          -DCMAKE_CXX_FLAGS="-Wpedantic"
+        cmake --build bld-strict -v
+        ctest --test-dir bld-strict --output-on-failure
+
+  # Static analysis. These tools surface findings on the mature backend code
+  # that are not yet all resolved, so the job is informational (it does not
+  # fail the build) but the output is available in the logs.
+  StaticAnalysis:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: install dependencies
+      run: sudo apt-get update && sudo apt-get install -y g++ cmake ninja-build clang-tidy cppcheck libasound-dev
+    - name: clang-tidy
+      continue-on-error: true
+      run: |
+        cmake -S . -B bld-tidy -G Ninja \
+          -DRTAUDIO_API_ALSA=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+        clang-tidy -p bld-tidy RtAudio.cpp rtaudio_c.cpp
+    - name: cppcheck
+      continue-on-error: true
+      run: |
+        cppcheck --std=c++11 --enable=warning,performance,portability \
+          --inline-suppr --suppress=missingIncludeSystem \
+          --quiet RtAudio.cpp rtaudio_c.cpp tests/unittest.cpp
