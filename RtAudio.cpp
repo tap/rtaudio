@@ -1158,9 +1158,9 @@ void RtApiCore :: probeDevices( void )
     return;
   }
 
-  AudioDeviceID ids[ nDevices ];
+  std::vector<AudioDeviceID> ids( nDevices ); // avoid a non-portable VLA
   property.mSelector = kAudioHardwarePropertyDevices;
-  result = AudioObjectGetPropertyData( kAudioObjectSystemObject, &property, 0, NULL, &dataSize, (void *) &ids );
+  result = AudioObjectGetPropertyData( kAudioObjectSystemObject, &property, 0, NULL, &dataSize, (void *) ids.data() );
   if ( result != noErr ) {
     errorText_ = "RtApiCore::probeDevices: OS-X system error getting device IDs.";
     error( RTAUDIO_SYSTEM_ERROR );
@@ -1375,8 +1375,8 @@ bool RtApiCore :: probeDeviceInfo( AudioDeviceID id, RtAudio::DeviceInfo& info )
   }
 
   UInt32 nRanges = dataSize / sizeof( AudioValueRange );
-  AudioValueRange rangeList[ nRanges ];
-  result = AudioObjectGetPropertyData( id, &property, 0, NULL, &dataSize, &rangeList );
+  std::vector<AudioValueRange> rangeList( nRanges ); // avoid a non-portable VLA
+  result = AudioObjectGetPropertyData( id, &property, 0, NULL, &dataSize, rangeList.data() );
   if ( result != kAudioHardwareNoError ) {
     errorStream_ << "RtApiCore::probeDeviceInfo: system error (" << getErrorCode( result ) << ") getting sample rates.";
     errorText_ = errorStream_.str();
