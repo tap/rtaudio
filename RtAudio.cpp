@@ -48,6 +48,7 @@
 #include <cwchar>
 #include <climits>
 #include <cmath>
+#include <atomic>
 #include <algorithm>
 #include <locale>
 
@@ -1104,6 +1105,15 @@ unsigned int RtApiCore :: getDefaultInputDevice( void )
 }
 
 // If a device used in an open stream is disconnected, close the stream.
+// Tears down the stream on its own thread; see streamDisconnectListener().
+static void *coreCloseStream( void *ptr )
+{
+  CallbackInfo *info = (CallbackInfo *) ptr;
+  RtApiCore *object = (RtApiCore *) info->object;
+  object->closeStream();
+  pthread_exit( NULL );
+}
+
 static OSStatus streamDisconnectListener( AudioObjectID /*id*/,
                                           UInt32 nAddresses,
                                           const AudioObjectPropertyAddress properties[],
@@ -1112,13 +1122,18 @@ static OSStatus streamDisconnectListener( AudioObjectID /*id*/,
   for ( UInt32 i=0; i<nAddresses; i++ ) {
     if ( properties[i].mSelector == kAudioDevicePropertyDeviceIsAlive ) {
       CallbackInfo *info = (CallbackInfo *) infoPointer;
-      RtApiCore *object = (RtApiCore *) info->object;
       info->deviceDisconnected = true;
-      object->closeStream();
+      // closeStream() must not run on this CoreAudio property-listener thread:
+      // it removes property listeners (which can deadlock when called from
+      // within a listener) and frees state shared with the audio callback.
+      // Spawn a detached thread to do the teardown and return immediately.
+      pthread_t threadId;
+      if ( pthread_create( &threadId, NULL, coreCloseStream, info ) == 0 )
+        pthread_detach( threadId );
       return kAudioHardwareUnspecifiedError;
     }
   }
-  
+
   return kAudioHardwareNoError;
 }
 
@@ -4532,8 +4547,8 @@ public:
     }
 
     // update "in" index
-    inIndex_ += bufferSize;
-    inIndex_ %= bufferSize_;
+    // std::atomic has no %=; compute and store (publishes the written data).
+    inIndex_ = ( inIndex_ + bufferSize ) % bufferSize_;
 
     return true;
   }
@@ -4594,8 +4609,8 @@ public:
     }
 
     // update "out" index
-    outIndex_ += bufferSize;
-    outIndex_ %= bufferSize_;
+    // std::atomic has no %=; compute and store (frees space for the producer).
+    outIndex_ = ( outIndex_ + bufferSize ) % bufferSize_;
 
     return true;
   }
@@ -4603,8 +4618,11 @@ public:
 private:
   char* buffer_;
   unsigned int bufferSize_;
-  unsigned int inIndex_;
-  unsigned int outIndex_;
+  // inIndex_ is written only by the producer, outIndex_ only by the consumer,
+  // but each is read by the other thread, so they are atomic to avoid a data
+  // race (and torn/stale reads of the ring-buffer fill level).
+  std::atomic<unsigned int> inIndex_;
+  std::atomic<unsigned int> outIndex_;
 };
 
 //-----------------------------------------------------------------------------
@@ -4639,12 +4657,21 @@ public:
     CoCreateInstance( CLSID_CResamplerMediaObject, NULL, CLSCTX_INPROC_SERVER,
                       IID_IUnknown, ( void** ) &_transformUnk );
 
-    _transformUnk->QueryInterface( IID_PPV_ARGS( &_transform ) );
+    // If the resampler MFT is unavailable, _transformUnk stays NULL; guard the
+    // rest of the setup so we do not dereference a NULL interface here or on the
+    // realtime audio thread. isValid() lets callers detect the failure.
+    if ( _transformUnk )
+      _transformUnk->QueryInterface( IID_PPV_ARGS( &_transform ) );
 
     #ifdef __IWMResamplerProps_FWD_DEFINED__
-      _transformUnk->QueryInterface( IID_PPV_ARGS( &_resamplerProps ) );
-      _resamplerProps->SetHalfFilterLength( 60 ); // best conversion quality
+      if ( _transformUnk )
+        _transformUnk->QueryInterface( IID_PPV_ARGS( &_resamplerProps ) );
+      if ( _resamplerProps )
+        _resamplerProps->SetHalfFilterLength( 60 ); // best conversion quality
     #endif
+
+    if ( !_transform )
+      return;
 
     // 3. Specify input / output format
 
@@ -4682,20 +4709,26 @@ public:
   {
     // 8. Send stream stop messages to Resampler
 
-    _transform->ProcessMessage( MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0 );
-    _transform->ProcessMessage( MFT_MESSAGE_NOTIFY_END_STREAMING, 0 );
+    if ( _transform )
+    {
+      _transform->ProcessMessage( MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0 );
+      _transform->ProcessMessage( MFT_MESSAGE_NOTIFY_END_STREAMING, 0 );
+    }
 
     // 9. Cleanup
 
     MFShutdown();
   }
 
+  // True if the underlying resampler MFT was created successfully.
+  bool isValid() const { return _transform != NULL; }
+
   void Convert( char* outBuffer, const char* inBuffer, unsigned int inSampleCount, unsigned int& outSampleCount, int maxOutSampleCount = -1 )
   {
     unsigned int inputBufferSize = _bytesPerSample * _channelCount * inSampleCount;
-    if ( _sampleRatio == 1 )
+    if ( _sampleRatio == 1 || !_transform )
     {
-      // no sample rate conversion required
+      // no sample rate conversion required (or resampler unavailable)
       memcpy( outBuffer, inBuffer, inputBufferSize );
       outSampleCount = inSampleCount;
       return;
@@ -4765,6 +4798,11 @@ public:
 
     rOutDataBuffer.pSample->ConvertToContiguousBuffer( &rOutBuffer );
     rOutBuffer->GetCurrentLength( &rBytes );
+
+    // Never write more than the caller's output buffer can hold: the resampler
+    // can emit more frames than requested at chunk boundaries.
+    if ( rBytes > outputBufferSize )
+      rBytes = outputBufferSize;
 
     rOutBuffer->Lock( &rOutByteBuffer, NULL, NULL );
     memcpy( outBuffer, rOutByteBuffer, rBytes );
@@ -6998,6 +7036,8 @@ bool RtApiDs :: probeDeviceOpen( unsigned int deviceId, StreamMode mode, unsigne
     handle = (DsHandle *) stream_.apiHandle;
   handle->id[mode] = ohandle;
   handle->buffer[mode] = bhandle;
+  ohandle = 0; // ownership transferred to handle; clear so the error path
+  bhandle = 0; // below does not double-release these objects
   handle->dsBufferSize[mode] = dsBufferSize;
   handle->dsPointerLeadTime[mode] = dsPointerLeadTime;
 
@@ -7048,6 +7088,26 @@ bool RtApiDs :: probeDeviceOpen( unsigned int deviceId, StreamMode mode, unsigne
     CloseHandle( handle->condition );
     delete handle;
     stream_.apiHandle = 0;
+  }
+
+  // Release the device/buffer objects created in this call if they were not
+  // yet transferred to the handle (e.g. an allocation failure between creating
+  // them and the assignment above). Otherwise they leak on every failed open.
+  if ( ohandle || bhandle ) {
+    if ( mode == OUTPUT ) {
+      LPDIRECTSOUNDBUFFER buffer = (LPDIRECTSOUNDBUFFER) bhandle;
+      LPDIRECTSOUND object = (LPDIRECTSOUND) ohandle;
+      if ( buffer ) buffer->Release();
+      if ( object ) object->Release();
+    }
+    else { // INPUT
+      LPDIRECTSOUNDCAPTUREBUFFER buffer = (LPDIRECTSOUNDCAPTUREBUFFER) bhandle;
+      LPDIRECTSOUNDCAPTURE object = (LPDIRECTSOUNDCAPTURE) ohandle;
+      if ( buffer ) buffer->Release();
+      if ( object ) object->Release();
+    }
+    ohandle = 0;
+    bhandle = 0;
   }
 
   for ( int i=0; i<2; i++ ) {

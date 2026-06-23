@@ -40,32 +40,34 @@ code changes; use them as a starting point, not an exact address.
 | M-3 | JACK        | `jack_get_ports()` result indexed without a NULL check.                | Fixed. |
 | H-1 | PulseAudio  | Handle (and its streams / cond var) leaked on open failure due to a shadowed `pah` and an error guard that never fired. | Fixed. |
 
+### Fixed defects (`Phase 2`)
+
+These were addressed in a second pass. They are backend changes that are
+compile-verified by CI (CoreAudio on macOS, WASAPI/DirectSound via the MinGW
+cross-builds) but, lacking the target hardware here, were **not** runtime-tested
+— review accordingly.
+
+| ID  | Area        | Defect                                                                 | Status |
+|-----|-------------|------------------------------------------------------------------------|--------|
+| C-3 | CoreAudio   | `streamDisconnectListener` called `closeStream()` directly on the property-listener thread (removes listeners from within a listener → deadlock; races the audio callback). | Fixed: spawns a detached teardown thread, mirroring JACK. |
+| C-5 | WASAPI      | `WasapiResampler` ctor ignored COM HRESULTs → NULL deref on the audio thread if the resampler MFT is unavailable. | Fixed: guards the interface pointers, adds `isValid()`, and `Convert()` passes through when the transform is absent. |
+| C-6 | WASAPI      | `WasapiResampler::Convert()` copied the resampler output without clamping to the caller's buffer capacity. | Fixed: clamps the copy to `outputBufferSize`. |
+| C-4 | DirectSound | Device/buffer COM objects leaked on open failures that occurred after creation but before they were stored in the handle. | Fixed: the error path releases the still-owned objects. |
+| H-5a| WASAPI      | SPSC ring-buffer indices (`inIndex_`/`outIndex_`) were plain `unsigned int` shared across threads → data race. | Fixed: now `std::atomic<unsigned int>`. |
+
 ## Known / deferred findings
 
-These are real but were deliberately **not** changed in this pass because the
-correct fix changes runtime behaviour (threading model, lock-free state) and
-cannot be validated without the target hardware. They are recorded here for a
-follow-up that can test on-device. Severity: 🔴 critical, 🟠 high, 🟡 medium.
+These are real but remain deliberately **not** changed because the correct fix
+changes cross-cutting runtime behaviour and cannot be validated without the
+target hardware. Recorded for a follow-up that can test on-device.
+Severity: 🔴 critical, 🟠 high, 🟡 medium.
 
-* 🔴 **CoreAudio disconnect listener calls `closeStream()` on a CoreAudio
-  thread** (`streamDisconnectListener`, ~RtAudio.cpp:1104). Frees buffers and
-  the handle with no coordination with the running audio callback → race /
-  use-after-free on device disconnect. JACK and ASIO instead spawn a teardown
-  thread; CoreAudio should do the same.
-* 🔴 **WASAPI resampler ignores all HRESULTs** (`WasapiResampler` ctor,
-  ~RtAudio.cpp:4626) → NULL deref on the audio thread if the resampler MFT is
-  unavailable. `Convert()` (~4707) also ignores `Lock` HRESULTs and does not
-  clamp the output copy length to the destination capacity (possible overflow
-  of `stream_.deviceBuffer`).
-* 🔴 **DirectSound device/buffer leak on every failed open**
-  (`probeDeviceOpen`, ~RtAudio.cpp:6939). The COM objects live in locals and
-  are only copied into `handle` at the end, so the `error:` cleanup (which
-  releases via `handle`) is skipped.
-* 🟠 **WASAPI realtime thread accesses `stream_.state` and the SPSC ring-buffer
-  indices without atomics** (`wasapiThread`, ~5911/6219; indices ~4522/4584).
-  `stream_.state` is a plain enum and the ring indices are plain `unsigned
-  int`, shared with the control thread → data races / missed stop signal. Make
-  `stream_.state` and the indices `std::atomic` with acquire/release.
+* 🟠 **WASAPI/other realtime threads read `stream_.state` without
+  synchronization** (`wasapiThread`, ~5911/6219). `stream_.state` is a plain
+  enum shared between the audio thread and control thread. Making it atomic is
+  a cross-cutting change (~180 use sites across every backend) and was left for
+  a dedicated pass; the WASAPI ring-buffer indices (the more concrete race) are
+  now atomic (H-5a).
 * 🟠 **JACK duplex-input error path tears down the shared output client**
   (~RtAudio.cpp:2996) and **`jackXrun` can run after the handle is freed** when
   `closeStream()` deletes without `jack_deactivate` first (~2965).
