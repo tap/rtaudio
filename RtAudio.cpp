@@ -1158,9 +1158,9 @@ void RtApiCore :: probeDevices( void )
     return;
   }
 
-  AudioDeviceID ids[ nDevices ];
+  std::vector<AudioDeviceID> ids( nDevices ); // avoid a non-portable VLA
   property.mSelector = kAudioHardwarePropertyDevices;
-  result = AudioObjectGetPropertyData( kAudioObjectSystemObject, &property, 0, NULL, &dataSize, (void *) &ids );
+  result = AudioObjectGetPropertyData( kAudioObjectSystemObject, &property, 0, NULL, &dataSize, (void *) ids.data() );
   if ( result != noErr ) {
     errorText_ = "RtApiCore::probeDevices: OS-X system error getting device IDs.";
     error( RTAUDIO_SYSTEM_ERROR );
@@ -1375,8 +1375,8 @@ bool RtApiCore :: probeDeviceInfo( AudioDeviceID id, RtAudio::DeviceInfo& info )
   }
 
   UInt32 nRanges = dataSize / sizeof( AudioValueRange );
-  AudioValueRange rangeList[ nRanges ];
-  result = AudioObjectGetPropertyData( id, &property, 0, NULL, &dataSize, &rangeList );
+  std::vector<AudioValueRange> rangeList( nRanges ); // avoid a non-portable VLA
+  result = AudioObjectGetPropertyData( id, &property, 0, NULL, &dataSize, rangeList.data() );
   if ( result != kAudioHardwareNoError ) {
     errorStream_ << "RtApiCore::probeDeviceInfo: system error (" << getErrorCode( result ) << ") getting sample rates.";
     errorText_ = errorStream_.str();
@@ -9094,11 +9094,11 @@ void RtApiAlsa :: callbackEvent()
     if ( stream_.deviceInterleaved[1] )
       result = snd_pcm_readi( handle[1], buffer, stream_.bufferSize );
     else {
-      void *bufs[channels];
+      std::vector<void *> bufs( channels ); // avoid a non-portable VLA
       size_t offset = stream_.bufferSize * formatBytes( format );
       for ( int i=0; i<channels; i++ )
         bufs[i] = (void *) (buffer + (i * offset));
-      result = snd_pcm_readn( handle[1], bufs, stream_.bufferSize );
+      result = snd_pcm_readn( handle[1], bufs.data(), stream_.bufferSize );
     }
 
     if ( result < (int) stream_.bufferSize ) {
@@ -9164,11 +9164,11 @@ void RtApiAlsa :: callbackEvent()
     if ( stream_.deviceInterleaved[0] )
       result = snd_pcm_writei( handle[0], buffer, stream_.bufferSize );
     else {
-      void *bufs[channels];
+      std::vector<void *> bufs( channels ); // avoid a non-portable VLA
       size_t offset = stream_.bufferSize * formatBytes( format );
       for ( int i=0; i<channels; i++ )
         bufs[i] = (void *) (buffer + (i * offset));
-      result = snd_pcm_writen( handle[0], bufs, stream_.bufferSize );
+      result = snd_pcm_writen( handle[0], bufs.data(), stream_.bufferSize );
     }
 
     if ( result < (int) stream_.bufferSize ) {

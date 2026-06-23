@@ -72,7 +72,9 @@ option(RTAUDIO_USE_NAMESPACE "Force usage of namespace rt::audio for modules" ON
 # Enable a useful set of compiler warnings on GCC/Clang.
 option(RTAUDIO_WARNINGS_AS_ERRORS "Treat compiler warnings as errors (for CI)" OFF)
 if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
+  # -Wvla so GCC also flags variable-length arrays (Clang catches them under
+  # -Wall already); VLAs are non-portable (MSVC rejects them).
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wvla")
   if (RTAUDIO_WARNINGS_AS_ERRORS)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
   endif ()
