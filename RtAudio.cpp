@@ -3401,6 +3401,8 @@ struct AsioHandle {
 static const char* getAsioErrorString( ASIOError result );
 static void sampleRateChanged( ASIOSampleRate sRate );
 static long asioMessages( long selector, long value, void* message, double* opt );
+static void bufferSwitch( long index, ASIOBool processNow );
+static ASIOTime *bufferSwitchTimeInfo( ASIOTime *timeInfo, long index, ASIOBool processNow );
 
 RtApiAsio :: RtApiAsio()
 {
@@ -3583,6 +3585,16 @@ static void bufferSwitch( long index, ASIOBool /*processNow*/ )
   if ( asioCallbackInfo == 0 ) return; // stream closed; callback raced teardown
   RtApiAsio *object = (RtApiAsio *) asioCallbackInfo->object;
   object->callbackEvent( index );
+}
+
+// Some drivers call bufferSwitchTimeInfo() regardless of what the host answers to
+// kAsioSupportsTimeInfo, so this callback must not be left NULL: those drivers would
+// call through a null pointer and take the process down. We make no use of the time
+// info, so hand the work to bufferSwitch().
+static ASIOTime *bufferSwitchTimeInfo( ASIOTime * /*timeInfo*/, long index, ASIOBool processNow )
+{
+  bufferSwitch( index, processNow );
+  return 0L;
 }
 
 bool RtApiAsio :: probeDeviceOpen( unsigned int deviceId, StreamMode mode, unsigned int channels,
@@ -3866,7 +3878,7 @@ bool RtApiAsio :: probeDeviceOpen( unsigned int deviceId, StreamMode mode, unsig
   asioCallbacks.bufferSwitch = &bufferSwitch;
   asioCallbacks.sampleRateDidChange = &sampleRateChanged;
   asioCallbacks.asioMessage = &asioMessages;
-  asioCallbacks.bufferSwitchTimeInfo = NULL;
+  asioCallbacks.bufferSwitchTimeInfo = &bufferSwitchTimeInfo;
   result = ASIOCreateBuffers( handle->bufferInfos, nChannels, stream_.bufferSize, &asioCallbacks );
   if ( result != ASE_OK ) {
     // Standard method failed. This can happen with strict/misbehaving drivers that return valid buffer size ranges
